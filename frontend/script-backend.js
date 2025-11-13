@@ -536,14 +536,8 @@ function startMasterClock(totalDurationInSeconds) {
         clockElProgressive.textContent = formatSeconds(elapsedSeconds);
         clockElRegressive.textContent = formatSeconds(remainingSeconds);
 
-        if (remainingSeconds < 0) {
-            clockElRegressive.style.color = '#f44336';
-        } else if (remainingSeconds < 60) {
-            clockElRegressive.style.color = '#FFD54F';
-        } else {
-            clockElRegressive.style.color = '#fff';
-        }
 
+        clockElRegressive.style.color = '#fff';
         clockElProgressive.style.color = '#fff';
 
     }, 1000);
