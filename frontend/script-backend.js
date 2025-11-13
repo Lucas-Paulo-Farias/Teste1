@@ -1,5 +1,5 @@
 // ==================== VARIAVEIS GLOBAIS / ESTADO ====================
-const API_URL = 'http://localhost:3000'; // URL do nosso backend
+const API_URL = 'https://teste1-zrvs.onrender.com/'; // URL do nosso backend
 
 // O estado agora é muito mais simples.
 // 'activities' = As atividades modelo (do Excel)
