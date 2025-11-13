@@ -1871,53 +1871,49 @@ async function generateFinalReportPDF() {
 }
 
 
-async function generatePdfFromElement(element, filename) {
-    showNotification('Gerando PDF (novo método)...', 4000);
-    
-    // Pega o HTML de dentro do elemento temporário
-    const htmlContent = element.innerHTML;
-    
-    // O elemento temporário não é mais necessário, podemos removê-lo
-    // (O 'finally' nas funções 'downloadTaskPDF' e 'downloadReportPDF' já fazem isso)
+// SUBSTITUA A FUNÇÃO 'generatePdfFromElement' INTEIRA POR ESTA VERSÃO ANTIGA:
 
+async function generatePdfFromElement(element, filename) {
+    showNotification('Gerando PDF... Aguarde.', 3000);
+    
     const { jsPDF } = window.jspdf;
     
-    // 1. Configura o documento PDF
-    const pdf = new jsPDF('p', 'mm', 'a4'); // 'p'ortrait, milímetros, A4
-    const pdfWidth = pdf.internal.pageSize.getWidth();
-    const margins = {
-        top: 15,
-        bottom: 15,
-        left: 10,
-        right: 10
-    };
-
     try {
-        // 2. Usa o método .html()
-        // Ele lê o HTML (com o <style> dentro) e renderiza de forma inteligente
-        await pdf.html(htmlContent, {
-            // Callback para salvar o arquivo quando terminar
-            callback: function (doc) {
-                doc.save(`${filename}.pdf`);
-                showNotification('PDF gerado com sucesso!', 3000);
-            },
-            
-            // Margens (em mm)
-            margin: [margins.top, margins.left, margins.bottom, margins.right],
-            
-            // Esta é a chave: Pede ao 'jspdf' para quebrar as páginas automaticamente
-            // 'text' é o modo mais inteligente, que tenta não cortar linhas de texto.
-            autoPaging: 'text', 
-            
-            // Largura que o conteúdo deve ocupar (largura A4 - margens)
-            width: pdfWidth - margins.left - margins.right,
-            
-            // Largura da "janela" virtual que renderiza o HTML
-            windowWidth: 700 // (um valor em 'px' razoável)
-        });
+        // 1. Tira um "screenshot" do elemento HTML
+        const canvas = await html2canvas(element, { 
+            scale: 2, // Aumenta a resolução da imagem
+            scrollY: -window.scrollY
+        }); 
+        
+        // 2. Converte o screenshot em dados de imagem
+        const imgData = canvas.toDataURL('image/png');
+        
+        // 3. Define as dimensões do PDF e da imagem
+        const imgWidth = 210; // Largura A4 em mm
+        const pageHeight = 295; // Altura A4 em mm
+        const imgHeight = canvas.height * imgWidth / canvas.width;
+        
+        const pdf = new jsPDF('p', 'mm', 'a4');
+        let position = 0; // Posição Y atual no PDF
+
+        // 4. Adiciona a primeira página
+        pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+        let heightLeft = imgHeight - pageHeight;
+
+        // 5. Adiciona mais páginas (se a imagem for maior que uma página A4)
+        while (heightLeft > 0) {
+            position = -(imgHeight - heightLeft); // Calcula a nova posição da imagem
+            pdf.addPage();
+            pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+            heightLeft -= pageHeight;
+        }
+        
+        // 6. Salva o arquivo
+        pdf.save(`${filename}.pdf`);
+        showNotification('PDF gerado com sucesso!', 3000);
 
     } catch (error) {
-        console.error("Erro ao gerar PDF com o método .html():", error);
+        console.error("Erro ao gerar PDF (método html2canvas):", error);
         showNotification('Erro ao gerar PDF. Verifique o console.', 5000, 'critical');
     }
 }
