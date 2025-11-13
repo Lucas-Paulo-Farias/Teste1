@@ -1,28 +1,25 @@
 // server.js
 const express = require('express');
-const mysql = require('mysql2/promise'); // Usamos 'promise' para async/await
+const { Pool } = require('pg');
 const cors = require('cors');
 
 const app = express();
-const port = 3000; // O backend rodará na porta 3000
+const port = process.env.PORT || 3000;
 
 // Middlewares
 app.use(cors()); // Permite acesso do seu frontend
 app.use(express.json({ limit: '50mb' })); // Permite JSON e aumenta o limite para as fotos em base64
 
-// =================================================================
-// ⚠️ CONFIGURE SEU BANCO DE DADOS AQUI ⚠️
-// =================================================================
-const dbConfig = {
-    host: 'localhost',
-    user: 'root', // <-- SEU USUÁRIO (ex: 'root')
-    password: 'SeEsquecerEhCorno', // <-- SUA SENHA
-    database: 'sistema_ditl'
-};
-// =================================================================
+// NOVO (PostgreSQL)
+const { Pool } = require('pg'); // Importa o Pool do 'pg'
 
-// Função helper para criar um pool de conexões
-const pool = mysql.createPool(dbConfig);
+// O Pool lê automaticamente a variável de ambiente 'DATABASE_URL' no Render
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false // Necessário para conexões no Render
+  }
+});
 
 // SUBSTITUA A FUNÇÃO 'toCamelCase' ANTIGA POR ESTA:
 
@@ -47,7 +44,8 @@ const toCamelCase = (rows) => {
  */
 app.get('/api/atividades-importadas', async (req, res) => {
     try {
-        const [rows] = await pool.query('SELECT * FROM atividades_importadas ORDER BY id');
+        // [MODIFICADO] { rows } e sem '?'
+        const { rows } = await pool.query('SELECT * FROM atividades_importadas ORDER BY id');
         res.json(toCamelCase(rows));
     } catch (error) {
         console.error('Erro em /api/atividades-importadas:', error);
@@ -62,26 +60,25 @@ app.get('/api/atividades-importadas', async (req, res) => {
  * @desc Salva (substitui) a lista de atividades "modelo".
  */
 app.post('/api/atividades-importadas', async (req, res) => {
-    const { activities } = req.body; // Espera um array de atividades
-    let conn; // Definimos a conexão aqui para usá-la no 'finally'
+    const { activities } = req.body;
+    // [MODIFICADO] 'pg' usa 'client' para transações
+    const client = await pool.connect(); 
 
     try {
-        conn = await pool.getConnection();
-        await conn.beginTransaction(); // Inicia a transação
+        await client.query('BEGIN'); // Inicia a transação
 
-        // 1. Limpa a tabela antiga
-        await conn.query('DELETE FROM atividades_importadas');
-        // 2. Reseta o auto-incremento
-        await conn.query('ALTER TABLE atividades_importadas AUTO_INCREMENT = 1');
+        await client.query('DELETE FROM atividades_importadas');
+        // [MODIFICADO] Sintaxe do Postgres para resetar ID
+        await client.query('ALTER SEQUENCE atividades_importadas_id_seq RESTART WITH 1');
 
-        // 3. Insere as novas atividades
         const query = `
             INSERT INTO atividades_importadas 
             (tempo_previsto, proc_id, evento, acao, criterios_aceitacao) 
-            VALUES (?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5)
         `;
         for (const act of activities) {
-            await conn.query(query, [
+            // [MODIFICADO] Placeholders $1, $2...
+            await client.query(query, [
                 act['T + (hh:mm)'],
                 act['Proc. ID'],
                 act['Event'],
@@ -90,21 +87,15 @@ app.post('/api/atividades-importadas', async (req, res) => {
             ]);
         }
 
-        // 4. Se tudo deu certo, confirma as mudanças
-        await conn.commit();
-        
+        await client.query('COMMIT'); // Confirma as mudanças
         res.status(201).json({ message: `${activities.length} atividades importadas.` });
 
     } catch (error) {
         console.error('Erro em POST /api/atividades-importadas:', error);
-        
-        // 5. [CORREÇÃO] Se algo deu errado, desfaz tudo
-        if (conn) await conn.rollback();
-        
+        await client.query('ROLLBACK'); // Desfaz em caso de erro
         res.status(500).json({ error: 'Erro de servidor ao importar. A operação foi desfeita.' });
     } finally {
-        // 6. [CORREÇÃO] Sempre libera a conexão de volta ao pool
-        if (conn) conn.release();
+        client.release(); // Libera o cliente de volta ao pool
     }
 });
 
@@ -115,34 +106,22 @@ app.post('/api/atividades-importadas', async (req, res) => {
  * @desc Limpa TODAS as atividades modelo (do Excel) e reseta o ID.
  */
 app.delete('/api/atividades-importadas', async (req, res) => {
-    let conn; // Definimos a conexão aqui para usá-la no 'finally'
-    
+    const client = await pool.connect();
     try {
-        conn = await pool.getConnection();
-        await conn.beginTransaction(); // Inicia a transação
-
-        // 1. Limpa a tabela
-        await conn.query('DELETE FROM atividades_importadas');
-        
-        // 2. Reseta o auto-incremento para 1
-        await conn.query('ALTER TABLE atividades_importadas AUTO_INCREMENT = 1');
-
-        // 3. Confirma as mudanças
-        await conn.commit();
+        await client.query('BEGIN');
+        await client.query('DELETE FROM atividades_importadas');
+        await client.query('ALTER SEQUENCE atividades_importadas_id_seq RESTART WITH 1');
+        await client.query('COMMIT');
 
         console.log('Tabela "atividades_importadas" foi limpa e resetada.');
         res.status(200).json({ message: 'Tabela de atividades importadas limpa.' });
 
     } catch (error) {
         console.error('Erro em DELETE /api/atividades-importadas:', error);
-        
-        // 4. [CORREÇÃO] Se algo deu errado, desfaz
-        if (conn) await conn.rollback();
-        
+        await client.query('ROLLBACK');
         res.status(500).json({ error: 'Erro de servidor ao limpar atividades.' });
     } finally {
-        // 5. [CORREÇÃO] Sempre libera a conexão
-        if (conn) conn.release();
+        client.release();
     }
 });
 
@@ -153,34 +132,32 @@ app.delete('/api/atividades-importadas', async (req, res) => {
  */
 app.get('/api/turno-ativo', async (req, res) => {
     try {
-        // 1. Encontra o turno ativo
-        const [turnos] = await pool.query('SELECT * FROM turnos WHERE status = ?', ['ativo']);
+        // [MODIFICADO] Sintaxe $1 e { rows }
+        const { rows: turnos } = await pool.query('SELECT * FROM turnos WHERE status = $1', ['ativo']);
         
         if (turnos.length === 0) {
-            return res.json(null); // Nenhum turno ativo
+            return res.json(null);
         }
 
         const turnoAtivo = toCamelCase(turnos)[0];
         
-// 2. Busca as tarefas desse turno
-        const [tarefas] = await pool.query(
-            // [CORREÇÃO] Ordena numericamente pela última parte do ID
-            'SELECT * FROM tarefas_execucao WHERE turno_instance_id = ? ORDER BY CAST(SUBSTRING_INDEX(task_id, \'-\', -1) AS UNSIGNED)', 
+        // [MODIFICADO] Sintaxe $1 e CAST
+        const { rows: tarefas } = await pool.query(
+            `SELECT * FROM tarefas_execucao WHERE turno_instance_id = $1 
+             ORDER BY CAST(SUBSTRING(task_id FROM '([0-9]+)$') AS INTEGER)`, // Regex PG para ordenar
             [turnoAtivo.instanceId]
         );
         const tarefasCamel = toCamelCase(tarefas);
 
-        // 3. Busca as fotos de CADA tarefa
         for (let tarefa of tarefasCamel) {
-            const [fotos] = await pool.query(
-                'SELECT imagem_base64 AS base64 FROM evidencias_fotos WHERE task_id = ?', 
+            // [MODIFICADO] Sintaxe $1 e { rows }
+            const { rows: fotos } = await pool.query(
+                'SELECT imagem_base64 AS base64 FROM evidencias_fotos WHERE task_id = $1', 
                 [tarefa.taskId]
             );
-            // Anexa as fotos (o frontend espera um array de strings base64)
             tarefa.photos = fotos.map(f => f.base64); 
         }
         
-        // 4. Retorna o objeto que o frontend espera (turno + tarefas com fotos)
         turnoAtivo.tasks = tarefasCamel;
         res.json(turnoAtivo);
 
@@ -195,56 +172,55 @@ app.get('/api/turno-ativo', async (req, res) => {
  * @desc Cria um novo turno e todas as suas tarefas baseadas nas atividades-modelo.
  */
 app.post('/api/turnos/iniciar', async (req, res) => {
+    const { operator, shiftStart, ditlTotalSeconds } = req.body;
+    const instanceId = `INST-${Date.now()}`;
+    const client = await pool.connect();
+
     try {
-        const { operator, shiftStart, ditlTotalSeconds } = req.body;
-        const instanceId = `INST-${Date.now()}`;
+        await client.query('BEGIN');
 
-        const conn = await pool.getConnection();
-        await conn.beginTransaction();
-
-// 1. Cria o Turno
-        await conn.query(
-            'INSERT INTO turnos (instance_id, operador_responsavel, inicio_turno, status) VALUES (?, ?, ?, ?)',
-            [instanceId, operator, new Date(shiftStart), 'ativo'] // <-- ALTERADO AQUI
+        // [MODIFICADO] $1, $2, $3, $4
+        await client.query(
+            'INSERT INTO turnos (instance_id, operador_responsavel, inicio_turno, status) VALUES ($1, $2, $3, $4)',
+            [instanceId, operator, new Date(shiftStart), 'ativo']
         );
 
-        // 2. Busca as atividades-modelo para criar as tarefas
-        const [atividades] = await conn.query('SELECT * FROM atividades_importadas ORDER BY id');
+        // [MODIFICADO] { rows }
+        const { rows: atividades } = await client.query('SELECT * FROM atividades_importadas ORDER BY id');
         
-        const tarefasParaInserir = [];
         const queryTarefa = `
             INSERT INTO tarefas_execucao 
             (task_id, turno_instance_id, proc_id, acao, status, time_mode, target_seconds) 
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
         `;
         
-        // 3. Prepara e insere cada tarefa
         let taskCounter = 1;
         for (const act of atividades) {
             const taskId = `TASK-${instanceId.split('-')[1]}-${taskCounter}`;
-            const targetSeconds = timeToTotalSeconds(act.tempo_previsto); // Função helper
+            const targetSeconds = timeToTotalSeconds(act.tempo_previsto);
             
-            await conn.query(queryTarefa, [
+            // [MODIFICADO] $1...$7
+            await client.query(queryTarefa, [
                 taskId,
                 instanceId,
                 act.proc_id,
                 act.acao,
-                'pendente',         // status inicial
-                'countdown',        // time_mode (padrão)
-                targetSeconds       // target_seconds
+                'pendente',
+                'countdown',
+                targetSeconds
             ]);
             taskCounter++;
         }
 
-        await conn.commit();
-        conn.release();
-
-        // 4. Retorna o ID do novo turno
+        await client.query('COMMIT');
         res.status(201).json({ instanceId: instanceId });
 
     } catch (error) {
         console.error('Erro em /api/turnos/iniciar:', error);
+        await client.query('ROLLBACK');
         res.status(500).json({ error: 'Erro de servidor' });
+    } finally {
+        client.release();
     }
 });
 
@@ -257,9 +233,10 @@ app.post('/api/turnos/:id/encerrar', async (req, res) => {
         const { id } = req.params;
         const { shiftEnd } = req.body;
 
-await pool.query(
-            'UPDATE turnos SET status = ?, fim_turno = ? WHERE instance_id = ?',
-            ['concluido', new Date(shiftEnd), id] // <-- ALTERADO AQUI
+        // [MODIFICADO] $1, $2, $3
+        await pool.query(
+            'UPDATE turnos SET status = $1, fim_turno = $2 WHERE instance_id = $3',
+            ['concluido', new Date(shiftEnd), id]
         );
         res.json({ message: 'Turno encerrado' });
     } catch (error) {
@@ -277,8 +254,9 @@ app.post('/api/tarefa/:id/atualizar-status', async (req, res) => {
         const { id } = req.params;
         const { status, runtimeSeconds } = req.body;
 
+        // [MODIFICADO] $1, $2, $3
         await pool.query(
-            'UPDATE tarefas_execucao SET status = ?, runtime_seconds = ? WHERE task_id = ?',
+            'UPDATE tarefas_execucao SET status = $1, runtime_seconds = $2 WHERE task_id = $3',
             [status, runtimeSeconds, id]
         );
         res.json({ message: 'Status atualizado' });
@@ -293,49 +271,50 @@ app.post('/api/tarefa/:id/atualizar-status', async (req, res) => {
  * @desc Completa uma tarefa (SUCESSO ou FALHA) e salva evidências.
  */
 app.post('/api/tarefa/:id/completar', async (req, res) => {
+    const { id } = req.params;
+    const { success, operatorTask, observation, completedAt, runtimeSeconds, photos } = req.body;
+    const client = await pool.connect();
+
     try {
-        const { id } = req.params;
-        const { success, operatorTask, observation, completedAt, runtimeSeconds, photos } = req.body;
+        await client.query('BEGIN');
 
-        const conn = await pool.getConnection();
-        await conn.beginTransaction();
-
-        // 1. Atualiza a tarefa principal
-        await conn.query(
-`UPDATE tarefas_execucao 
-             SET status = ?, success = ?, operador_tarefa = ?, observacao = ?, 
-                 completed = TRUE, completed_at = ?, runtime_seconds = ?
-             WHERE task_id = ?`,
+        // [MODIFICADO] $1...$8
+        await client.query(
+            `UPDATE tarefas_execucao 
+             SET status = $1, success = $2, operador_tarefa = $3, observacao = $4, 
+                 completed = TRUE, completed_at = $5, runtime_seconds = $6
+             WHERE task_id = $7`,
             [
                 success ? 'concluido' : 'falha',
                 success,
                 operatorTask,
                 observation,
-                new Date(completedAt), // <-- ALTERADO AQUI
+                new Date(completedAt),
                 runtimeSeconds,
                 id
             ]
         );
         
-        // 2. Deleta fotos antigas (caso esteja completando novamente após reiniciar)
-        await conn.query('DELETE FROM evidencias_fotos WHERE task_id = ?', [id]);
+        // [MODIFICADO] $1
+        await client.query('DELETE FROM evidencias_fotos WHERE task_id = $1', [id]);
         
-        // 3. Salva as novas fotos (evidências)
         for (let base64Img of photos) {
-            await conn.query(
-                'INSERT INTO evidencias_fotos (task_id, imagem_base64) VALUES (?, ?)',
+            // [MODIFICADO] $1, $2
+            await client.query(
+                'INSERT INTO evidencias_fotos (task_id, imagem_base64) VALUES ($1, $2)',
                 [id, base64Img]
             );
         }
         
-        await conn.commit();
-        conn.release();
-        
+        await client.query('COMMIT');
         res.json({ success: true, message: 'Tarefa completada' });
         
     } catch (error) {
         console.error('Erro em /api/tarefa/:id/completar:', error);
+        await client.query('ROLLBACK');
         res.status(500).json({ error: 'Erro de servidor' });
+    } finally {
+        client.release();
     }
 });
 
@@ -344,32 +323,34 @@ app.post('/api/tarefa/:id/completar', async (req, res) => {
  * @desc Reseta uma tarefa para o estado inicial.
  */
 app.post('/api/tarefa/:id/reiniciar', async (req, res) => {
-    try {
-        const { id } = req.params;
+    const { id } = req.params;
+    const client = await pool.connect();
         
-        const conn = await pool.getConnection();
-        await conn.beginTransaction();
+    try {
+        await client.query('BEGIN');
 
-        // 1. Reseta a tarefa
-        await conn.query(
+        // [MODIFICADO] $1
+        // (Nota: No Postgres, 'NULL' não precisa de 'SET')
+        await client.query(
             `UPDATE tarefas_execucao 
              SET status = 'pendente', runtime_seconds = 0, operador_tarefa = NULL, 
                  observacao = NULL, completed = FALSE, completed_at = NULL, success = NULL
-             WHERE task_id = ?`,
+             WHERE task_id = $1`,
             [id]
         );
         
-        // 2. Deleta as evidências associadas
-        await conn.query('DELETE FROM evidencias_fotos WHERE task_id = ?', [id]);
+        // [MODIFICADO] $1
+        await client.query('DELETE FROM evidencias_fotos WHERE task_id = $1', [id]);
         
-        await conn.commit();
-        conn.release();
-        
+        await client.query('COMMIT');
         res.json({ success: true, message: 'Tarefa reiniciada' });
         
     } catch (error) {
         console.error('Erro em /api/tarefa/:id/reiniciar:', error);
+        await client.query('ROLLBACK');
         res.status(500).json({ error: 'Erro de servidor' });
+    } finally {
+        client.release();
     }
 });
 
@@ -379,25 +360,26 @@ app.post('/api/tarefa/:id/reiniciar', async (req, res) => {
  */
 app.get('/api/relatorios', async (req, res) => {
     try {
-        // Busca todos os turnos, ordenados do mais novo para o mais antigo
-        const [turnos] = await pool.query(
+        // [MODIFICADO] { rows }
+        const { rows: turnos } = await pool.query(
             'SELECT * FROM turnos ORDER BY inicio_turno DESC'
         );
         
         const turnosCamel = toCamelCase(turnos);
 
-        // Para cada turno, precisamos contar as tarefas
         for (let turno of turnosCamel) {
-            const [stats] = await pool.query(
-                `SELECT COUNT(*) AS total, SUM(completed = TRUE) AS done 
+            // [MODIFICADO] $1 e { rows }
+            // (Nota: SUM no PG retorna um tipo 'bigint' que o JS lê como string,
+            // então usamos '::INTEGER' para converter)
+            const { rows: stats } = await pool.query(
+                `SELECT COUNT(*) AS total, SUM(CASE WHEN completed THEN 1 ELSE 0 END)::INTEGER AS done 
                  FROM tarefas_execucao 
-                 WHERE turno_instance_id = ?`,
+                 WHERE turno_instance_id = $1`,
                 [turno.instanceId]
             );
             turno.tasksTotal = stats[0].total || 0;
             turno.tasksDone = stats[0].done || 0;
         }
-
         res.json(turnosCamel);
 
     } catch (error) {
@@ -414,8 +396,8 @@ app.get('/api/relatorio/:id', async (req, res) => {
     try {
         const { id } = req.params;
 
-        // 1. Encontra o turno
-        const [turnos] = await pool.query('SELECT * FROM turnos WHERE instance_id = ?', [id]);
+        // [MODIFICADO] $1 e { rows }
+        const { rows: turnos } = await pool.query('SELECT * FROM turnos WHERE instance_id = $1', [id]);
         
         if (turnos.length === 0) {
             return res.status(404).json({ error: 'Relatório não encontrado' });
@@ -423,25 +405,25 @@ app.get('/api/relatorio/:id', async (req, res) => {
         
         const turno = toCamelCase(turnos)[0];
         
-        // 2. Busca as tarefas
-        const [tarefas] = await pool.query(
-            'SELECT * FROM tarefas_execucao WHERE turno_instance_id = ? ORDER BY task_id', 
+        // [MODIFICADO] $1 e CAST
+        const { rows: tarefas } = await pool.query(
+            `SELECT * FROM tarefas_execucao WHERE turno_instance_id = $1 
+             ORDER BY CAST(SUBSTRING(task_id FROM '([0-9]+)$') AS INTEGER)`,
             [turno.instanceId]
         );
         const tarefasCamel = toCamelCase(tarefas);
 
-        // 3. Busca as fotos de CADA tarefa
         for (let tarefa of tarefasCamel) {
-            const [fotos] = await pool.query(
-                'SELECT imagem_base64 AS base64 FROM evidencias_fotos WHERE task_id = ?', 
+            // [MODIFICADO] $1 e { rows }
+            const { rows: fotos } = await pool.query(
+                'SELECT imagem_base64 AS base64 FROM evidencias_fotos WHERE task_id = $1', 
                 [tarefa.taskId]
             );
             tarefa.photos = fotos.map(f => f.base64); 
             
-            // [Ajuste]: O frontend espera os nomes de colunas do Excel
-            // Vamos adicionar eles aqui para o relatório funcionar sem refatorar o HTML
-            const [modelo] = await pool.query(
-                'SELECT acao, criterios_aceitacao, proc_id FROM atividades_importadas WHERE proc_id = ?',
+            // [MODIFICADO] $1 e { rows }
+            const { rows: modelo } = await pool.query(
+                'SELECT acao, criterios_aceitacao, proc_id FROM atividades_importadas WHERE proc_id = $1',
                 [tarefa.procId]
             );
             if(modelo.length > 0) {
@@ -465,31 +447,21 @@ app.get('/api/relatorio/:id', async (req, res) => {
 
 // Função helper (copiada do seu script.js)
 function timeToTotalSeconds(timeStr) {
-    if (!timeStr) return 0; // Retorna 0 se for nulo
-
-    // Usa Regex para encontrar todos os pares "HH:MM" no texto
+    if (!timeStr) return 0;
     const matches = timeStr.match(/(\d{2}):(\d{2})/g);
-
-    // Se não encontrar nenhum (ex: "–"), retorna 0
     if (!matches) return 0;
-
-    // Pega o último par encontrado (ex: "00:30" de "T + 00:00–00:30")
     const lastTimeStr = matches[matches.length - 1]; 
     const parts = lastTimeStr.split(':').map(p => parseInt(p, 10));
-
     if (parts.length === 2) {
         const hours = parts[0];
         const minutes = parts[1];
         const totalSeconds = (hours * 3600) + (minutes * 60);
-
-        // Garante que o resultado nunca seja NaN
         return isNaN(totalSeconds) ? 0 : totalSeconds;
     }
-
-    return 0; // Retorno padrão
+    return 0;
 }
 
 // Inicia o servidor
 app.listen(port, () => {
-    console.log(`🚀 Backend DITL rodando em http://localhost:${port}`);
+    console.log(`🚀 Backend DITL rodando na porta ${port}`);
 });
