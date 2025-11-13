@@ -1872,28 +1872,54 @@ async function generateFinalReportPDF() {
 
 
 async function generatePdfFromElement(element, filename) {
-    // ... (Função 100% igual)
-    showNotification('Gerando PDF... Aguarde.', 3000);
+    showNotification('Gerando PDF (novo método)...', 4000);
+    
+    // Pega o HTML de dentro do elemento temporário
+    const htmlContent = element.innerHTML;
+    
+    // O elemento temporário não é mais necessário, podemos removê-lo
+    // (O 'finally' nas funções 'downloadTaskPDF' e 'downloadReportPDF' já fazem isso)
+
     const { jsPDF } = window.jspdf;
-    const canvas = await html2canvas(element, {
-        scale: 2,
-        scrollY: -window.scrollY
-    });
-    const imgData = canvas.toDataURL('image/png');
-    const imgWidth = 210;
-    const pageHeight = 295;
-    const imgHeight = canvas.height * imgWidth / canvas.width;
-    let position = 0;
-    const pdf = new jsPDF('p', 'mm', 'a4');
-    pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-    let heightLeft = imgHeight - pageHeight;
-    while (heightLeft > 0) {
-        position = -(imgHeight - heightLeft);
-        pdf.addPage();
-        pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-        heightLeft -= pageHeight;
+    
+    // 1. Configura o documento PDF
+    const pdf = new jsPDF('p', 'mm', 'a4'); // 'p'ortrait, milímetros, A4
+    const pdfWidth = pdf.internal.pageSize.getWidth();
+    const margins = {
+        top: 15,
+        bottom: 15,
+        left: 10,
+        right: 10
+    };
+
+    try {
+        // 2. Usa o método .html()
+        // Ele lê o HTML (com o <style> dentro) e renderiza de forma inteligente
+        await pdf.html(htmlContent, {
+            // Callback para salvar o arquivo quando terminar
+            callback: function (doc) {
+                doc.save(`${filename}.pdf`);
+                showNotification('PDF gerado com sucesso!', 3000);
+            },
+            
+            // Margens (em mm)
+            margin: [margins.top, margins.left, margins.bottom, margins.right],
+            
+            // Esta é a chave: Pede ao 'jspdf' para quebrar as páginas automaticamente
+            // 'text' é o modo mais inteligente, que tenta não cortar linhas de texto.
+            autoPaging: 'text', 
+            
+            // Largura que o conteúdo deve ocupar (largura A4 - margens)
+            width: pdfWidth - margins.left - margins.right,
+            
+            // Largura da "janela" virtual que renderiza o HTML
+            windowWidth: 700 // (um valor em 'px' razoável)
+        });
+
+    } catch (error) {
+        console.error("Erro ao gerar PDF com o método .html():", error);
+        showNotification('Erro ao gerar PDF. Verifique o console.', 5000, 'critical');
     }
-    pdf.save(`${filename}.pdf`);
 }
 
 // ... (checkDueTasks e startScheduledChecker são iguais, lógica de UI) ...
