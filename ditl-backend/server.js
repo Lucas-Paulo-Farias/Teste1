@@ -10,8 +10,6 @@ const port = process.env.PORT || 3000;
 app.use(cors()); // Permite acesso do seu frontend
 app.use(express.json({ limit: '50mb' })); // Permite JSON e aumenta o limite para as fotos em base64
 
-// NOVO (PostgreSQL)
-const { Pool } = require('pg'); // Importa o Pool do 'pg'
 
 // O Pool lê automaticamente a variável de ambiente 'DATABASE_URL' no Render
 const pool = new Pool({
